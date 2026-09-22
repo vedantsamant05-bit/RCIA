@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RCIA · Regulatory Change-Impact Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="frame">
+
+  <!-- ============ Nav rail ============ -->
+  <nav class="rail">
+    <div class="rail-brand">
+      <span class="rail-brand-mark">RCIA</span>
+      <span class="rail-brand-sub">Change-Impact Agent</span>
+    </div>
+
+    <div class="rail-nav">
+      <button class="rail-link active" data-view="ingest">Ingest regulation</button>
+      <button class="rail-link" data-view="queue">Review queue <span class="rail-count" id="count-queue"></span></button>
+      <button class="rail-link" data-view="corpus">Internal corpus</button>
+      <button class="rail-link" data-view="audit">Audit log</button>
+      <button class="rail-link" data-view="eval">Evaluation</button>
+    </div>
+
+    <div class="rail-status" id="rail-status">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">Connecting…</span>
+    </div>
+  </nav>
+
+  <!-- ============ Main content ============ -->
+  <main class="content">
+
+    <!-- ---------- INGEST VIEW ---------- -->
+    <section class="view active" id="view-ingest">
+      <header class="view-head">
+        <h1>Ingest a regulatory change</h1>
+        <p class="view-sub">Paste new circular or amendment text. The agent will segment it into clauses, retrieve affected internal policy clauses, classify the impact, draft a redline, and route each finding to the review queue.</p>
+      </header>
+
+      <div class="ingest-grid">
+        <form id="ingest-form" class="panel">
+          <label class="field">
+            <span class="field-label">Title</span>
+            <input type="text" id="reg-title" placeholder="e.g. Master Direction on Periodic KYC Updation" required />
+          </label>
+          <label class="field">
+            <span class="field-label">Source <span class="field-optional">(optional)</span></span>
+            <input type="text" id="reg-source" placeholder="e.g. RBI circular no. …" />
+          </label>
+          <label class="field">
+            <span class="field-label">Regulatory text</span>
+            <textarea id="reg-text" rows="12" placeholder="Paste the circular / amendment text here. Numbered clauses (Clause 1(a):, Para 3.1:, Section 2:) are detected automatically." required></textarea>
+          </label>
+          <div class="field-row">
+            <button type="submit" class="btn btn-primary" id="ingest-submit">Run pipeline</button>
+            <button type="button" class="btn btn-ghost" id="load-sample">Load a sample regulation</button>
+          </div>
+        </form>
+
+        <aside class="panel ingest-result" id="ingest-result">
+          <p class="muted">Pipeline output for the most recent ingestion will appear here — clauses extracted, candidates retrieved, and items routed to review.</p>
+        </aside>
+      </div>
+
+      <div class="ledger-block">
+        <h2 class="ledger-heading">Ingested regulations</h2>
+        <div class="ledger" id="regulations-list">
+          <p class="muted pad">No regulations ingested yet.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- REVIEW QUEUE VIEW ---------- -->
+    <section class="view" id="view-queue">
+      <header class="view-head">
+        <h1>Review queue</h1>
+        <p class="view-sub">Nothing here is applied automatically. Every finding — including auto-dismissed no-ops — is logged; only <em>flagged</em> and <em>escalated</em> items require human decision.</p>
+      </header>
+
+      <!-- Pipeline Summary Bar -->
+      <div class="summary-bar" id="pipeline-summary-bar">
+        <div class="summary-card">
+          <div class="summary-val" id="stat-clauses">0</div>
+          <div class="summary-lbl">Clauses analyzed</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-val" id="stat-candidates">0</div>
+          <div class="summary-lbl">Candidates retrieved</div>
+        </div>
+        <div class="summary-card highlight-impact">
+          <div class="summary-val" id="stat-impacts">0</div>
+          <div class="summary-lbl">Material impacts</div>
+        </div>
+        <div class="summary-card muted-card">
+          <div class="summary-val" id="stat-dismissed">0</div>
+          <div class="summary-lbl">Irrelevant candidates auto-dismissed</div>
+        </div>
+      </div>
+
+      <div class="filter-row">
+        <button class="chip active" data-status="pending_material">Pending Material</button>
+        <button class="chip" data-status="">All Candidates</button>
+        <button class="chip" data-status="pending">All Pending</button>
+        <button class="chip" data-status="approved">Approved</button>
+        <button class="chip" data-status="rejected">Rejected</button>
+        <button class="chip" data-status="auto_dismissed">No-op dismissed</button>
+        <button class="chip" data-status="auto_dismissed_irrelevant">Irrelevant (below threshold)</button>
+      </div>
+
+      <div class="queue-list" id="queue-list">
+        <p class="muted pad">Loading review queue…</p>
+      </div>
+    </section>
+
+    <!-- ---------- CORPUS VIEW ---------- -->
+    <section class="view" id="view-corpus">
+      <header class="view-head">
+        <h1>Internal policy corpus</h1>
+        <p class="view-sub">Synthetic-but-realistic internal SOPs used as the retrieval target. In production this is the organization's real policy/contract repository.</p>
+      </header>
+      <div class="corpus-list" id="corpus-list">
+        <p class="muted pad">Loading corpus…</p>
+      </div>
+    </section>
+
+    <!-- ---------- AUDIT LOG VIEW ---------- -->
+    <section class="view" id="view-audit">
+      <header class="view-head">
+        <h1>Audit log</h1>
+        <p class="view-sub">Full, read-only trace of every decision the agent has made: inputs, retrieved evidence, reasoning steps, confidence, and reviewer action.</p>
+      </header>
+      <div class="audit-table-wrap">
+        <table class="audit-table" id="audit-table">
+          <thead>
+            <tr>
+              <th>Logged</th><th>Regulation</th><th>Internal clause</th><th>Impact</th>
+              <th>Confidence</th><th>Risk</th><th>Routing</th><th>Status</th><th>Reviewer</th>
+            </tr>
+          </thead>
+          <tbody id="audit-tbody">
+            <tr><td colspan="9" class="muted pad">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------- EVAL VIEW ---------- -->
+    <section class="view" id="view-eval">
+      <header class="view-head">
+        <h1>Evaluation</h1>
+        <p class="view-sub">Scored against a hand-labeled test set of (regulation clause, internal clause) pairs — see Section 5 of the project design doc.</p>
+      </header>
+
+      <button class="btn btn-primary" id="run-eval">Run evaluation</button>
+
+      <div class="eval-grid" id="eval-metrics"></div>
+
+      <div class="ledger-block">
+        <h2 class="ledger-heading">Per-pair detail</h2>
+        <div class="ledger" id="eval-detail">
+          <p class="muted pad">Run the evaluation to see per-pair results.</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ---------- Detail drawer (shared, slides over content) ---------- -->
+<div class="drawer" id="drawer">
+  <div class="drawer-backdrop" id="drawer-backdrop"></div>
+  <div class="drawer-panel">
+    <button class="drawer-close" id="drawer-close">Close</button>
+    <div id="drawer-content"></div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
