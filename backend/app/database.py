@@ -17,9 +17,15 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "rcia.db")
-DB_PATH = os.path.abspath(DB_PATH)
-
+if os.environ.get("VERCEL"):
+    DB_PATH = "/tmp/rcia.db"
+else:
+    DB_PATH = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "rcia.db"
+    )
+    DB_PATH = os.path.abspath(DB_PATH)
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

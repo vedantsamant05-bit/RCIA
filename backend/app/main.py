@@ -23,6 +23,8 @@ import uuid
 from typing import Optional, Literal
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -526,3 +528,20 @@ def get_sample_regulations():
 @app.get("/api/health")
 def health():
     return {"status": "ok", "llm_enabled": bool(__import__("os").environ.get("ANTHROPIC_API_KEY"))}
+# ---------------------------------------------------------------------------
+# Frontend
+# ---------------------------------------------------------------------------
+# Serve the existing vanilla HTML/CSS/JS frontend at the root URL.
+# This is declared AFTER all /api routes so the API routes keep priority.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_DIR = PROJECT_ROOT / "frontend"
+
+if FRONTEND_DIR.exists():
+    app.mount(
+        "/",
+        StaticFiles(
+            directory=str(FRONTEND_DIR),
+            html=True
+        ),
+        name="frontend"
+    )
