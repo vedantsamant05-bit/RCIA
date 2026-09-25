@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from . import database as db
 from .corpus_data import INTERNAL_POLICIES, SAMPLE_REGULATIONS, EVAL_LABELS
@@ -112,7 +112,19 @@ def _load_corpus(conn) -> list[dict]:
 class RegulationIn(BaseModel):
     title: str
     source: Optional[str] = None
-    text: str
+    regulatory_text: Optional[str] = None
+    text: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_and_normalize(self):
+        content = self.regulatory_text or self.text
+        if not content or not content.strip():
+            raise ValueError("regulatory_text is required")
+        if not self.regulatory_text:
+            self.regulatory_text = content.strip()
+        if not self.text:
+            self.text = content.strip()
+        return self
 
 
 class CorpusDocIn(BaseModel):
@@ -129,17 +141,21 @@ class ReviewActionIn(BaseModel):
 # ---------------------------------------------------------------------------
 # Ingestion + pipeline
 # ---------------------------------------------------------------------------
+@router.post("/pipeline")
+@router.post("/pipeline/")
 @router.post("/regulations/ingest")
+@router.post("/regulations/ingest/")
 def ingest_regulation(reg: RegulationIn, top_k: int = 4):
     with db.get_conn() as conn:
         reg_id = f"reg-{uuid.uuid4().hex[:8]}"
+        reg_text = reg.regulatory_text or reg.text or ""
         conn.execute(
             "INSERT INTO regulations (id, title, source, raw_text, ingested_at) VALUES (?, ?, ?, ?, ?)",
-            (reg_id, reg.title, reg.source, reg.text, db.now_iso()),
+            (reg_id, reg.title, reg.source, reg_text, db.now_iso()),
         )
 
         # NLP preprocessing: clause segmentation + obligation extraction
-        clauses = segment_into_clauses(reg.text, id_prefix="regc")
+        clauses = segment_into_clauses(reg_text, id_prefix="regc")
 
         corpus = _load_corpus(conn)
         retriever = HybridRetriever(corpus)
@@ -536,11 +552,13 @@ def run_eval():
 # Convenience: load sample regulations for demo purposes
 # ---------------------------------------------------------------------------
 @router.get("/samples")
+@router.get("/samples/")
 def get_sample_regulations():
     return SAMPLE_REGULATIONS
 
 
 @router.get("/health")
+@router.get("/health/")
 def health():
     return {"status": "ok", "llm_enabled": bool(__import__("os").environ.get("ANTHROPIC_API_KEY"))}
 

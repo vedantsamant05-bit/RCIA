@@ -167,23 +167,71 @@
           `;
 
           try {
-            const res = await fetch(
-              `${API_BASE}/api/regulations/ingest`,
+            const payload = {
+              title,
+              source: source || null,
+              regulatory_text: text,
+              text,
+            };
+
+            let res = await fetch(
+              `${API_BASE}/api/pipeline`,
               {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
                 },
-                body: JSON.stringify({
-                  title,
-                  source: source || null,
-                  text,
-                }),
+                body: JSON.stringify(payload),
               }
             );
 
+            // Resilient fallback to /api/regulations/ingest if /api/pipeline is not found or not allowed
+            if ((res.status === 404 || res.status === 405) && !res.ok) {
+              res = await fetch(
+                `${API_BASE}/api/regulations/ingest`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify(payload),
+                }
+              );
+            }
+
             if (!res.ok) {
-              throw new Error(await res.text());
+              let errorDetail = "";
+              try {
+                const contentType = res.headers.get("content-type") || "";
+                if (contentType.includes("application/json")) {
+                  const errorJson = await res.json();
+                  if (errorJson.detail) {
+                    if (Array.isArray(errorJson.detail)) {
+                      errorDetail = errorJson.detail
+                        .map((d) => (d.loc ? `${d.loc.slice(1).join(".")}: ` : "") + d.msg)
+                        .join("; ");
+                    } else if (typeof errorJson.detail === "string") {
+                      errorDetail = errorJson.detail;
+                    } else {
+                      errorDetail = JSON.stringify(errorJson.detail);
+                    }
+                  } else if (errorJson.message) {
+                    errorDetail = errorJson.message;
+                  } else {
+                    errorDetail = JSON.stringify(errorJson);
+                  }
+                } else {
+                  errorDetail = (await res.text()).trim();
+                }
+              } catch (e) {
+                errorDetail = res.statusText || "";
+              }
+
+              if (!errorDetail) {
+                errorDetail = res.statusText || `HTTP ${res.status}`;
+              }
+
+              throw new Error(`Server error ${res.status} (${res.statusText || "Failed"}): ${errorDetail}`);
             }
 
             const data = await res.json();
@@ -236,9 +284,15 @@
             refreshQueueCount();
           } catch (err) {
             ingestResultEl.innerHTML = `
-              <p style="color:var(--risk-high)">
-                Pipeline failed: ${esc(err.message)}
-              </p>
+              <div class="pipeline-error" style="border: 1px solid var(--risk-high, #ef4444); background: rgba(239, 68, 68, 0.08); padding: 14px; border-radius: 6px; margin-top: 8px;">
+                <div style="font-weight: 600; color: var(--risk-high, #ef4444); margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+                  <span>✕</span>
+                  <span>Pipeline Execution Failed</span>
+                </div>
+                <p style="color: var(--risk-high, #ef4444); font-size: 13px; margin: 0; line-height: 1.4; word-break: break-word;">
+                  ${esc(err.message)}
+                </p>
+              </div>
             `;
           } finally {
             ingestSubmitBtn.disabled = false;
