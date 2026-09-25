@@ -21,11 +21,12 @@ Why hybrid, concretely:
   producing false positives that only exact-term/BM25 signal can filter.
 
 IMPLEMENTATION NOTE (read this before treating this as "the" dense
-model): to keep this project runnable with zero external services and
-no API key, the "dense" component here is TF-IDF cosine similarity, not
-a trained embedding model. It captures shared-vocabulary semantic
-similarity but NOT true paraphrase understanding. For a production /
-resume-defensible version, swap `_dense_scores()` below for one of:
+model): to keep this project runnable with zero external services, no
+API key, and completely deployable within serverless constraints (e.g. Vercel),
+the retrieval and ranking algorithms are implemented in pure Python.
+TF-IDF cosine similarity stands in for a trained embedding model here.
+It captures shared-vocabulary semantic similarity but NOT true paraphrase understanding.
+For a production / resume-defensible version, swap `_dense_scores()` below for one of:
   - sentence-transformers (e.g. `all-MiniLM-L6-v2`) run locally, or
   - a hosted embedding API (OpenAI text-embedding-3, Voyage, Cohere).
 The rest of the pipeline (BM25 fusion, reranking, hop logic) is
@@ -39,24 +40,50 @@ false-positive candidates before they reach the LLM reasoning step.
 """
 
 from dataclasses import dataclass
-from rank_bm25 import BM25Okapi
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
+from collections import Counter
+import math
 import re
+
+# ---------------------------------------------------------------------------
+# Stop words (Standard English Stop Words)
+# ---------------------------------------------------------------------------
+ENGLISH_STOP_WORDS = frozenset([
+    'a', 'about', 'above', 'across', 'after', 'afterwards', 'again', 'against', 'all', 'almost',
+    'alone', 'along', 'already', 'also', 'although', 'always', 'am', 'among', 'amongst', 'amoungst',
+    'amount', 'an', 'and', 'another', 'any', 'anyhow', 'anyone', 'anything', 'anyway', 'anywhere',
+    'are', 'around', 'as', 'at', 'back', 'be', 'became', 'because', 'become', 'becomes', 'becoming',
+    'been', 'before', 'beforehand', 'behind', 'being', 'below', 'beside', 'besides', 'between',
+    'beyond', 'bill', 'both', 'bottom', 'but', 'by', 'call', 'can', 'cannot', 'cant', 'co', 'con',
+    'could', 'couldnt', 'cry', 'de', 'describe', 'detail', 'do', 'done', 'down', 'due', 'during',
+    'each', 'eg', 'eight', 'either', 'eleven', 'else', 'elsewhere', 'empty', 'enough', 'etc', 'even',
+    'ever', 'every', 'everyone', 'everything', 'everywhere', 'except', 'few', 'fifteen', 'fifty',
+    'fill', 'find', 'fire', 'first', 'five', 'for', 'former', 'formerly', 'forty', 'found', 'four',
+    'from', 'front', 'full', 'further', 'get', 'give', 'go', 'had', 'has', 'hasnt', 'have', 'he',
+    'hence', 'her', 'here', 'hereafter', 'hereby', 'herein', 'hereupon', 'hers', 'herself', 'him',
+    'himself', 'his', 'how', 'however', 'hundred', 'i', 'ie', 'if', 'in', 'inc', 'indeed', 'interest',
+    'into', 'is', 'it', 'its', 'itself', 'keep', 'last', 'latter', 'latterly', 'least', 'less', 'ltd',
+    'made', 'many', 'may', 'me', 'meanwhile', 'might', 'mill', 'mine', 'more', 'moreover', 'most',
+    'mostly', 'move', 'much', 'must', 'my', 'myself', 'name', 'namely', 'neither', 'never',
+    'nevertheless', 'next', 'nine', 'no', 'nobody', 'none', 'noone', 'nor', 'not', 'nothing', 'now',
+    'nowhere', 'of', 'off', 'often', 'on', 'once', 'one', 'only', 'onto', 'or', 'other', 'others',
+    'otherwise', 'our', 'ours', 'ourselves', 'out', 'over', 'own', 'part', 'per', 'perhaps', 'please',
+    'put', 'rather', 're', 'same', 'see', 'seem', 'seemed', 'seeming', 'seems', 'serious', 'several',
+    'she', 'should', 'show', 'side', 'since', 'sincere', 'six', 'sixty', 'so', 'some', 'somehow',
+    'someone', 'something', 'sometime', 'sometimes', 'somewhere', 'still', 'such', 'system', 'take',
+    'ten', 'than', 'that', 'the', 'their', 'them', 'themselves', 'then', 'thence', 'there',
+    'thereafter', 'thereby', 'therefore', 'therein', 'thereupon', 'these', 'they', 'thick', 'thin',
+    'third', 'this', 'those', 'though', 'three', 'through', 'throughout', 'thru', 'thus', 'to',
+    'together', 'too', 'top', 'toward', 'towards', 'twelve', 'twenty', 'two', 'un', 'under', 'until',
+    'up', 'upon', 'us', 'very', 'via', 'was', 'we', 'well', 'were', 'what', 'whatever', 'when',
+    'whence', 'whenever', 'where', 'whereafter', 'whereas', 'whereby', 'wherein', 'whereupon',
+    'wherever', 'whether', 'which', 'while', 'whither', 'who', 'whoever', 'whole', 'whom', 'whose',
+    'why', 'will', 'with', 'within', 'without', 'would', 'yet', 'you', 'your', 'yours', 'yourself',
+    'yourselves'
+])
 
 # ---------------------------------------------------------------------------
 # Relevance gate
 # ---------------------------------------------------------------------------
-# Candidates whose rerank_score falls below this threshold are returned but
-# flagged as irrelevant BEFORE they reach the agent classifier. This prevents
-# a weak keyword overlap from being promoted to contradicts/tightens/loosens
-# purely because numbers happen to co-occur.
-#
-# The gate uses an absolute score, not a per-query rank score. This prevents
-# an unrelated candidate from becoming score=1 simply because it was the
-# least-unrelated result in a weak candidate set.
 RELEVANCE_THRESHOLD: float = 0.38
 GENERIC_RELEVANCE_TERMS = {
     "account", "business", "customer", "customers", "data", "days", "entity",
@@ -85,9 +112,119 @@ RELEVANCE_TOPIC_GROUPS = {
     "subprocessor": "vendor_security",
 }
 
+_WORD_PATTERN = re.compile(r"[a-zA-Z]+")
+_TOKEN_PATTERN = re.compile(r"(?u)\b\w\w+\b")
+
 
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"[a-zA-Z]+", text.lower())
+    return _WORD_PATTERN.findall(text.lower())
+
+
+def _extract_ngrams(text: str) -> list[str]:
+    words = _TOKEN_PATTERN.findall(text.lower())
+    unigrams = [w for w in words if w not in ENGLISH_STOP_WORDS]
+    bigrams = [
+        f"{words[i]} {words[i+1]}"
+        for i in range(len(words) - 1)
+        if words[i] not in ENGLISH_STOP_WORDS and words[i+1] not in ENGLISH_STOP_WORDS
+    ]
+    return unigrams + bigrams
+
+
+class LightweightTfidf:
+    """Lightweight, zero-dependency TF-IDF vectorizer matching scikit-learn smooth_idf."""
+
+    def __init__(self):
+        self.idf = {}
+        self.doc_vectors = []
+
+    def fit_transform(self, docs: list[str]):
+        n_docs = len(docs)
+        if n_docs == 0:
+            return self
+        doc_ngrams = [_extract_ngrams(d) for d in docs]
+        df = Counter()
+        for ngrams in doc_ngrams:
+            df.update(set(ngrams))
+
+        # Sklearn formula: log((1 + n_samples) / (1 + df)) + 1
+        self.idf = {
+            term: math.log((1 + n_docs) / (1 + count)) + 1.0
+            for term, count in df.items()
+        }
+
+        self.doc_vectors = []
+        for ngrams in doc_ngrams:
+            counts = Counter(ngrams)
+            vec = {t: counts[t] * self.idf[t] for t in counts if t in self.idf}
+            norm = math.sqrt(sum(v * v for v in vec.values()))
+            if norm > 0:
+                vec = {t: v / norm for t, v in vec.items()}
+            self.doc_vectors.append(vec)
+        return self
+
+    def score(self, query: str) -> list[float]:
+        q_ngrams = _extract_ngrams(query)
+        counts = Counter(q_ngrams)
+        q_vec = {t: counts[t] * self.idf[t] for t in counts if t in self.idf}
+        norm = math.sqrt(sum(v * v for v in q_vec.values()))
+        if norm > 0:
+            q_vec = {t: v / norm for t, v in q_vec.items()}
+        else:
+            return [0.0] * len(self.doc_vectors)
+
+        scores = []
+        for d_vec in self.doc_vectors:
+            s = sum(q_vec[t] * d_val for t, d_val in d_vec.items() if t in q_vec)
+            scores.append(s)
+        return scores
+
+
+class PureBM25Okapi:
+    """Pure-Python BM25Okapi implementation without external dependencies."""
+
+    def __init__(self, corpus_tokens: list[list[str]], k1=1.5, b=0.75, epsilon=0.25):
+        self.k1 = k1
+        self.b = b
+        self.epsilon = epsilon
+        self.corpus_size = len(corpus_tokens)
+        self.doc_len = [len(doc) for doc in corpus_tokens]
+        self.avgdl = sum(self.doc_len) / self.corpus_size if self.corpus_size > 0 else 0
+        self.doc_freqs = [Counter(doc) for doc in corpus_tokens]
+        self.idf = {}
+        self._calc_idf()
+
+    def _calc_idf(self):
+        df = Counter()
+        for doc in self.doc_freqs:
+            df.update(doc.keys())
+        idf_sum = 0
+        negative_idfs = []
+        for word, freq in df.items():
+            idf = math.log(self.corpus_size - freq + 0.5) - math.log(freq + 0.5)
+            self.idf[word] = idf
+            idf_sum += idf
+            if idf < 0:
+                negative_idfs.append(word)
+        avg_idf = idf_sum / len(self.idf) if self.idf else 0
+        eps = self.epsilon * avg_idf
+        for word in negative_idfs:
+            self.idf[word] = eps
+
+    def get_scores(self, query_tokens: list[str]) -> list[float]:
+        scores = [0.0] * self.corpus_size
+        for i in range(self.corpus_size):
+            d_len = self.doc_len[i]
+            d_freqs = self.doc_freqs[i]
+            denom_const = self.k1 * (1 - self.b + self.b * d_len / self.avgdl) if self.avgdl > 0 else 1.0
+            doc_score = 0.0
+            for q in query_tokens:
+                q_freq = d_freqs.get(q, 0)
+                if q_freq > 0:
+                    idf_val = self.idf.get(q, 0.0)
+                    doc_score += idf_val * (q_freq * (self.k1 + 1)) / (q_freq + denom_const)
+            scores[i] = doc_score
+        return scores
 
 
 @dataclass
@@ -105,48 +242,39 @@ class RetrievalCandidate:
 
 class HybridRetriever:
     """
-    Built fresh over the current internal-clause corpus. For a corpus this
-    small (tens to low-hundreds of clauses) rebuilding the index per query
-    is cheap; at real scale you'd persist the BM25/vector index instead of
-    rebuilding it in __init__ every time (e.g. Elasticsearch + FAISS/
-    Weaviate/Pinecone, per the tech stack in Section 6).
+    Built fresh over the current internal-clause corpus. Pure Python implementation
+    optimized for fast execution and zero external dependencies.
     """
 
     def __init__(self, corpus_clauses: list[dict]):
-        # corpus_clauses: [{id, doc_title, section, text}, ...]
         self.corpus = corpus_clauses
         self.texts = [c["text"] for c in corpus_clauses]
         self._tokenized = [_tokenize(t) for t in self.texts]
-        self.bm25 = BM25Okapi(self._tokenized) if self.texts else None
+        self.bm25 = PureBM25Okapi(self._tokenized) if self.texts else None
+        self.vectorizer = LightweightTfidf().fit_transform(self.texts) if self.texts else None
 
-        self.vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
-        self._tfidf_matrix = (
-            self.vectorizer.fit_transform(self.texts) if self.texts else None
-        )
-
-    def _bm25_scores(self, query: str) -> np.ndarray:
+    def _bm25_scores(self, query: str) -> list[float]:
         if not self.bm25:
-            return np.array([])
-        scores = np.array(self.bm25.get_scores(_tokenize(query)))
-        return _minmax(scores)
+            return []
+        scores = self.bm25.get_scores(_tokenize(query))
+        return self._minmax(scores)
 
-    def _dense_scores(self, query: str) -> np.ndarray:
-        # See module docstring: TF-IDF cosine similarity stands in for a
-        # trained embedding model here.
-        if self._tfidf_matrix is None:
-            return np.array([])
-        q_vec = self.vectorizer.transform([query])
-        return cosine_similarity(q_vec, self._tfidf_matrix)[0]
+    def _dense_scores(self, query: str) -> list[float]:
+        if not self.vectorizer:
+            return []
+        return self.vectorizer.score(query)
+
+    def _minmax(self, arr: list[float]) -> list[float]:
+        if not arr:
+            return []
+        lo, hi = min(arr), max(arr)
+        if hi - lo < 1e-9:
+            return [0.0] * len(arr)
+        return [(x - lo) / (hi - lo) for x in arr]
 
     def _rerank(self, query: str, candidate_text: str, dense_score: float) -> float:
         """
         Absolute relevance proxy used by the pre-classification gate.
-
-        Dense similarity captures broader topical matches while meaningful
-        query-term coverage makes the score resistant to generic compliance
-        boilerplate. Numeric overlap is deliberately not a relevance boost:
-        dates and limits are useful for classification only after a candidate
-        has established that it discusses the same obligation.
         """
         query_terms = {
             t for t in _tokenize(query)
@@ -180,19 +308,17 @@ class HybridRetriever:
         bm25_weight: float = 0.5,
         threshold: float = RELEVANCE_THRESHOLD,
     ) -> list[RetrievalCandidate]:
-        """Return the top-k candidates from the corpus, each annotated with
-        `below_threshold=True` when the rerank score is too weak to justify
-        running the full agent pipeline. Callers decide what to do with those;
-        typically they still log the candidate (for auditability) but skip
-        classification so no false-positive impacts are generated."""
         if not self.corpus:
             return []
 
         bm25_scores = self._bm25_scores(query)
         dense_scores = self._dense_scores(query)
-        hybrid = bm25_weight * bm25_scores + (1 - bm25_weight) * dense_scores
+        hybrid = [
+            bm25_weight * b + (1 - bm25_weight) * d
+            for b, d in zip(bm25_scores, dense_scores)
+        ]
 
-        ranked_idx = np.argsort(-hybrid)[:top_k]
+        ranked_idx = sorted(range(len(hybrid)), key=lambda i: hybrid[i], reverse=True)[:top_k]
         results = []
         for i in ranked_idx:
             c = self.corpus[i]
@@ -204,23 +330,12 @@ class HybridRetriever:
                     doc_title=c["doc_title"],
                     section=c["section"],
                     text=c["text"],
-                    bm25_score=float(bm25_scores[i]) if len(bm25_scores) else 0.0,
-                    dense_score=float(dense_scores[i]) if len(dense_scores) else 0.0,
+                    bm25_score=float(bm25_scores[i]) if bm25_scores else 0.0,
+                    dense_score=float(dense_scores[i]) if dense_scores else 0.0,
                     hybrid_score=fused,
                     rerank_score=rerank_score,
                     below_threshold=rerank_score < threshold,
                 )
             )
-        # Final ordering is by rerank_score, matching a real
-        # retrieve-then-rerank pipeline.
         results.sort(key=lambda r: -r.rerank_score)
         return results
-
-
-def _minmax(arr: np.ndarray) -> np.ndarray:
-    if arr.size == 0:
-        return arr
-    lo, hi = arr.min(), arr.max()
-    if hi - lo < 1e-9:
-        return np.zeros_like(arr)
-    return (arr - lo) / (hi - lo)

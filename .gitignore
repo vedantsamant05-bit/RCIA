@@ -1,6 +1,9 @@
 backend/venv/
+.venv/
 __pycache__/
 *.pyc
 .env
 *.env
 .vercel
+_uv/
+*.db

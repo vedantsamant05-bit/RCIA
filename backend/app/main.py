@@ -22,7 +22,7 @@ Endpoints map directly onto the architecture diagram in the project doc:
 import uuid
 from typing import Optional, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,7 +34,8 @@ from .nlp_preprocessing import segment_into_clauses
 from .retrieval import HybridRetriever, RELEVANCE_THRESHOLD
 from .agent import run_agent_pipeline
 
-app = FastAPI(title="RCIA - Regulatory Change-Impact Agent")
+app = FastAPI(title="RCIA - Regulatory Change-Impact Agent", redirect_slashes=False)
+router = APIRouter()
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,16 +46,30 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Startup: init DB + seed synthetic corpus if empty
+# Startup & DB lifecycle: init DB + seed synthetic corpus if empty
 # ---------------------------------------------------------------------------
-@app.on_event("startup")
-def on_startup():
+_db_initialized = False
+
+def ensure_db():
+    global _db_initialized
+    if _db_initialized:
+        return
     db.init_db()
     with db.get_conn() as conn:
         count = conn.execute("SELECT COUNT(*) c FROM internal_clauses").fetchone()["c"]
         if count == 0:
             _seed_corpus(conn)
             _seed_eval_labels(conn)
+    _db_initialized = True
+
+@app.on_event("startup")
+def on_startup():
+    ensure_db()
+
+@app.middleware("http")
+async def ensure_db_middleware(request, call_next):
+    ensure_db()
+    return await call_next(request)
 
 
 def _seed_corpus(conn):
@@ -114,7 +129,7 @@ class ReviewActionIn(BaseModel):
 # ---------------------------------------------------------------------------
 # Ingestion + pipeline
 # ---------------------------------------------------------------------------
-@app.post("/api/regulations/ingest")
+@router.post("/regulations/ingest")
 def ingest_regulation(reg: RegulationIn, top_k: int = 4):
     with db.get_conn() as conn:
         reg_id = f"reg-{uuid.uuid4().hex[:8]}"
@@ -264,7 +279,7 @@ def ingest_regulation(reg: RegulationIn, top_k: int = 4):
         }
 
 
-@app.get("/api/regulations")
+@router.get("/regulations")
 def list_regulations():
     with db.get_conn() as conn:
         rows = conn.execute(
@@ -273,7 +288,7 @@ def list_regulations():
         return [dict(r) for r in rows]
 
 
-@app.get("/api/regulations/{regulation_id}/results")
+@router.get("/regulations/{regulation_id}/results")
 def get_regulation_results(regulation_id: str):
     with db.get_conn() as conn:
         reg = conn.execute("SELECT * FROM regulations WHERE id = ?", (regulation_id,)).fetchone()
@@ -308,7 +323,7 @@ def _serialize_review_item(row) -> dict:
 # ---------------------------------------------------------------------------
 # Corpus browsing / management
 # ---------------------------------------------------------------------------
-@app.get("/api/corpus")
+@router.get("/corpus")
 def get_corpus():
     with db.get_conn() as conn:
         rows = conn.execute(
@@ -322,7 +337,7 @@ def get_corpus():
         return docs
 
 
-@app.post("/api/corpus")
+@router.post("/corpus")
 def add_corpus_doc(doc: CorpusDocIn):
     with db.get_conn() as conn:
         ids = []
@@ -340,7 +355,7 @@ def add_corpus_doc(doc: CorpusDocIn):
 # ---------------------------------------------------------------------------
 # Human review queue (Section 4.5 guardrail: nothing auto-applies)
 # ---------------------------------------------------------------------------
-@app.get("/api/review")
+@router.get("/review")
 def get_review_queue(status: Optional[str] = None):
     with db.get_conn() as conn:
         query = """SELECT rv.*, r.title as regulation_title, rc.clause_text as regulation_clause_text,
@@ -361,7 +376,7 @@ def get_review_queue(status: Optional[str] = None):
 
 
 
-@app.post("/api/review/{item_id}")
+@router.post("/review/{item_id}")
 def act_on_review_item(item_id: str, action_in: ReviewActionIn):
     with db.get_conn() as conn:
         row = conn.execute("SELECT * FROM review_items WHERE id = ?", (item_id,)).fetchone()
@@ -386,7 +401,7 @@ def act_on_review_item(item_id: str, action_in: ReviewActionIn):
 # Audit log (Section 4.5: full trail of inputs, evidence, reasoning, confidence,
 # reviewer action)
 # ---------------------------------------------------------------------------
-@app.get("/api/audit")
+@router.get("/audit")
 def get_audit_log():
     with db.get_conn() as conn:
         rows = conn.execute(
@@ -411,7 +426,7 @@ def get_audit_log():
 # ---------------------------------------------------------------------------
 # Evaluation (Section 5): score the pipeline against the hand-labeled set
 # ---------------------------------------------------------------------------
-@app.get("/api/eval")
+@router.get("/eval")
 def run_eval():
     with db.get_conn() as conn:
         labels = conn.execute("SELECT * FROM eval_labels").fetchall()
@@ -520,28 +535,42 @@ def run_eval():
 # ---------------------------------------------------------------------------
 # Convenience: load sample regulations for demo purposes
 # ---------------------------------------------------------------------------
-@app.get("/api/samples")
+@router.get("/samples")
 def get_sample_regulations():
     return SAMPLE_REGULATIONS
 
 
-@app.get("/api/health")
+@router.get("/health")
 def health():
     return {"status": "ok", "llm_enabled": bool(__import__("os").environ.get("ANTHROPIC_API_KEY"))}
+
+
+# Include router under /api (standard) and at root prefix (fallback for stripped rewrites)
+app.include_router(router, prefix="/api")
+app.include_router(router, prefix="", include_in_schema=False)
+
+
 # ---------------------------------------------------------------------------
 # Frontend
 # ---------------------------------------------------------------------------
-# Serve the existing vanilla HTML/CSS/JS frontend at the root URL.
-# This is declared AFTER all /api routes so the API routes keep priority.
+# Serve static frontend files when running directly via Uvicorn.
+# On Vercel, static assets at the root are served directly by the edge CDN.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
+static_dir = None
 if FRONTEND_DIR.exists():
+    static_dir = FRONTEND_DIR
+elif (PROJECT_ROOT / "index.html").exists():
+    static_dir = PROJECT_ROOT
+
+if static_dir and static_dir.exists():
     app.mount(
         "/",
         StaticFiles(
-            directory=str(FRONTEND_DIR),
+            directory=str(static_dir),
             html=True
         ),
         name="frontend"
     )
+

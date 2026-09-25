@@ -17,8 +17,10 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+import tempfile
+
 if os.environ.get("VERCEL"):
-    DB_PATH = "/tmp/rcia.db"
+    DB_PATH = os.path.join(tempfile.gettempdir(), "rcia.db")
 else:
     DB_PATH = os.path.join(
         os.path.dirname(__file__),
