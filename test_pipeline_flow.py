@@ -38,6 +38,55 @@ def test_pipeline_and_results():
     assert "items" in results_data
     assert len(results_data["items"]) > 0
 
+def test_vercel_routing_query_param():
+    """Verify that requests rewritten by Vercel to /api/index.py?__vercel_path=/api/pipeline correctly invoke the pipeline."""
+    r_samples = client.get("/api/samples")
+    sample_payload = {
+        "title": "KYC Periodic Review Directive",
+        "source": "RBI",
+        "regulatory_text": r_samples.json()[2]["regulatory_text"]
+    }
+    r = client.post("/api/index.py?__vercel_path=/api/pipeline", json=sample_payload)
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+    data = r.json()
+    assert "regulation_id" in data
+    assert data["clauses_extracted"] > 0
+    assert data["candidates_retrieved"] > 0
+
+def test_vercel_routing_header():
+    """Verify that requests rewritten by Vercel carrying x-matched-path correctly route."""
+    r_samples = client.get("/api/samples")
+    sample_payload = {
+        "title": "KYC Verification Directive",
+        "source": "RBI",
+        "regulatory_text": r_samples.json()[2]["regulatory_text"]
+    }
+    r = client.post("/api/index.py", headers={"x-matched-path": "/api/pipeline"}, json=sample_payload)
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+    assert "regulation_id" in r.json()
+
+def test_vercel_direct_index_py_fallback():
+    """Verify that direct POST /api/index.py fallback invokes RCIA pipeline without 405."""
+    r_samples = client.get("/api/samples")
+    sample_payload = {
+        "title": "KYC Fallback Test",
+        "source": "RBI",
+        "regulatory_text": r_samples.json()[2]["regulatory_text"]
+    }
+    r = client.post("/api/index.py", json=sample_payload)
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+    assert "regulation_id" in r.json()
+
+def test_vercel_get_health_via_index_py():
+    """Verify GET /api/index.py?__vercel_path=/api/health routes to health endpoint."""
+    r = client.get("/api/index.py?__vercel_path=/api/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+    r_direct = client.get("/api/index.py")
+    assert r_direct.status_code == 200
+    assert r_direct.json()["status"] == "ok"
+
 def test_review_and_audit():
     r_queue = client.get("/api/review")
     assert r_queue.status_code == 200
@@ -63,6 +112,10 @@ if __name__ == "__main__":
     test_health()
     test_samples()
     test_pipeline_and_results()
+    test_vercel_routing_query_param()
+    test_vercel_routing_header()
+    test_vercel_direct_index_py_fallback()
+    test_vercel_get_health_via_index_py()
     test_review_and_audit()
     test_pipeline_method_not_allowed()
     test_openapi_schema()

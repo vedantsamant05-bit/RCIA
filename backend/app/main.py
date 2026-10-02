@@ -19,7 +19,9 @@ Endpoints map directly onto the architecture diagram in the project doc:
                                      hand-labeled test set
 """
 
+import os
 import uuid
+import urllib.parse
 from typing import Optional, Literal
 
 from contextlib import asynccontextmanager
@@ -36,12 +38,64 @@ from .nlp_preprocessing import segment_into_clauses
 from .retrieval import HybridRetriever, RELEVANCE_THRESHOLD
 from .agent import run_agent_pipeline
 
+class VercelPathRewriteMiddleware:
+    """
+    Ensures that when Vercel serverless rewrites incoming /api/* requests to /api/index.py,
+    the original intended request path (e.g. /api/pipeline or /api/health) is restored
+    so FastAPI's internal router routes the request to the correct endpoint handler.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+
+            # Check if request arrived targeted at index.py or /api/index.py
+            if path in ("/api/index.py", "/index.py", "/api/index", "/index"):
+                target_path = None
+
+                # 1. Check query_string for __vercel_path or __path
+                qs = scope.get("query_string", b"").decode("utf-8", errors="replace")
+                if qs:
+                    params = urllib.parse.parse_qs(qs)
+                    if "__vercel_path" in params:
+                        target_path = params["__vercel_path"][0]
+                        clean_params = [(k, v) for k, vs in urllib.parse.parse_qsl(qs) for v in [vs] if k != "__vercel_path"]
+                        scope["query_string"] = urllib.parse.urlencode(clean_params).encode("utf-8")
+                    elif "__path" in params:
+                        target_path = params["__path"][0]
+                        clean_params = [(k, v) for k, vs in urllib.parse.parse_qsl(qs) for v in [vs] if k != "__path"]
+                        scope["query_string"] = urllib.parse.urlencode(clean_params).encode("utf-8")
+
+                # 2. Check headers for x-matched-path, x-forwarded-uri, or x-forwarded-url
+                if not target_path:
+                    headers_dict = {k.lower(): v.decode("utf-8", errors="replace") for k, v in scope.get("headers", [])}
+                    for header_name in ("x-matched-path", "x-forwarded-uri", "x-forwarded-url", "x-original-uri"):
+                        h_val = headers_dict.get(header_name)
+                        if h_val and h_val not in ("/api/index.py", "/index.py", "/api/index", "/index"):
+                            target_path = h_val.split("?")[0]
+                            break
+
+                # 3. Fallback: if method is POST and still targeting index.py, route to /api/pipeline
+                if not target_path and scope.get("method") == "POST":
+                    target_path = "/api/pipeline"
+
+                if target_path:
+                    if not target_path.startswith("/"):
+                        target_path = "/" + target_path
+                    scope["path"] = target_path
+                    scope["raw_path"] = target_path.encode("utf-8")
+
+        await self.app(scope, receive, send)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ensure_db()
     yield
 
 app = FastAPI(title="RCIA - Regulatory Change-Impact Agent", redirect_slashes=False, lifespan=lifespan)
+app.add_middleware(VercelPathRewriteMiddleware)
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -206,6 +260,8 @@ class ReviewActionIn(BaseModel):
 @router.post("/pipeline/", include_in_schema=False)
 @router.post("/regulations/ingest", include_in_schema=False)
 @router.post("/regulations/ingest/", include_in_schema=False)
+@router.post("/index.py", include_in_schema=False)
+@router.post("/index.py/", include_in_schema=False)
 def ingest_regulation(reg: RegulationIn, top_k: int = 4):
     with db.get_conn() as conn:
         reg_id = f"reg-{uuid.uuid4().hex[:8]}"
@@ -637,8 +693,10 @@ def get_sample_regulations():
 
 @router.get("/health")
 @router.get("/health/")
+@router.get("/index.py", include_in_schema=False)
+@router.get("/index.py/", include_in_schema=False)
 def health():
-    return {"status": "ok", "llm_enabled": bool(__import__("os").environ.get("ANTHROPIC_API_KEY"))}
+    return {"status": "ok", "llm_enabled": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
 
 # Include router under /api (standard) and at root prefix (fallback for stripped rewrites)
@@ -660,7 +718,7 @@ if FRONTEND_DIR.exists():
 elif (PROJECT_ROOT / "index.html").exists():
     static_dir = PROJECT_ROOT
 
-if static_dir and static_dir.exists():
+if not os.environ.get("VERCEL") and static_dir and static_dir.exists():
     app.mount(
         "/",
         StaticFiles(
