@@ -8,6 +8,10 @@
     {
       "source": "/api",
       "destination": "/api/index.py?__vercel_path=/api"
+    },
+    {
+      "source": "/",
+      "destination": "/api/index.py?__vercel_path=/"
     }
   ]
 }

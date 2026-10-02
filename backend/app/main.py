@@ -26,7 +26,7 @@ from typing import Optional, Literal
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,9 +40,14 @@ from .agent import run_agent_pipeline
 
 class VercelPathRewriteMiddleware:
     """
-    Ensures that when Vercel serverless rewrites incoming /api/* requests to /api/index.py,
-    the original intended request path (e.g. /api/pipeline or /api/health) is restored
-    so FastAPI's internal router routes the request to the correct endpoint handler.
+    Restores the original request path when Vercel serverless rewrites incoming requests
+    to /api/index.py (e.g. /api/pipeline → /api/index.py?__vercel_path=/api/pipeline,
+    or / → /api/index.py?__vercel_path=/).
+
+    Resolution order:
+      1. __vercel_path query parameter (injected by our vercel.json rewrite rules)
+      2. x-matched-path / x-forwarded-uri / x-forwarded-url headers (Vercel platform headers)
+      3. POST fallback → /api/pipeline
     """
     def __init__(self, app):
         self.app = app
@@ -51,35 +56,46 @@ class VercelPathRewriteMiddleware:
         if scope["type"] == "http":
             path = scope.get("path", "")
 
-            # Check if request arrived targeted at index.py or /api/index.py
-            if path in ("/api/index.py", "/index.py", "/api/index", "/index"):
+            # Always check for __vercel_path query param regardless of current path
+            qs = scope.get("query_string", b"").decode("utf-8", errors="replace")
+            if qs:
+                params = urllib.parse.parse_qs(qs)
+                if "__vercel_path" in params:
+                    target_path = params["__vercel_path"][0]
+                    clean_params = [(k, v) for k, vs in urllib.parse.parse_qsl(qs) for v in [vs] if k != "__vercel_path"]
+                    scope["query_string"] = urllib.parse.urlencode(clean_params).encode("utf-8")
+                    if not target_path.startswith("/"):
+                        target_path = "/" + target_path
+                    scope["path"] = target_path
+                    scope["raw_path"] = target_path.encode("utf-8")
+                elif "__path" in params:
+                    target_path = params["__path"][0]
+                    clean_params = [(k, v) for k, vs in urllib.parse.parse_qsl(qs) for v in [vs] if k != "__path"]
+                    scope["query_string"] = urllib.parse.urlencode(clean_params).encode("utf-8")
+                    if not target_path.startswith("/"):
+                        target_path = "/" + target_path
+                    scope["path"] = target_path
+                    scope["raw_path"] = target_path.encode("utf-8")
+
+            # Only apply header/fallback logic when path still points to index.py
+            elif path in ("/api/index.py", "/index.py", "/api/index", "/index"):
                 target_path = None
 
-                # 1. Check query_string for __vercel_path or __path
-                qs = scope.get("query_string", b"").decode("utf-8", errors="replace")
-                if qs:
-                    params = urllib.parse.parse_qs(qs)
-                    if "__vercel_path" in params:
-                        target_path = params["__vercel_path"][0]
-                        clean_params = [(k, v) for k, vs in urllib.parse.parse_qsl(qs) for v in [vs] if k != "__vercel_path"]
-                        scope["query_string"] = urllib.parse.urlencode(clean_params).encode("utf-8")
-                    elif "__path" in params:
-                        target_path = params["__path"][0]
-                        clean_params = [(k, v) for k, vs in urllib.parse.parse_qsl(qs) for v in [vs] if k != "__path"]
-                        scope["query_string"] = urllib.parse.urlencode(clean_params).encode("utf-8")
+                # Check headers for x-matched-path, x-forwarded-uri, or x-forwarded-url
+                headers_dict = {k.lower(): v.decode("utf-8", errors="replace") for k, v in scope.get("headers", [])}
+                for header_name in ("x-matched-path", "x-forwarded-uri", "x-forwarded-url", "x-original-uri"):
+                    h_val = headers_dict.get(header_name)
+                    if h_val and h_val not in ("/api/index.py", "/index.py", "/api/index", "/index"):
+                        target_path = h_val.split("?")[0]
+                        break
 
-                # 2. Check headers for x-matched-path, x-forwarded-uri, or x-forwarded-url
-                if not target_path:
-                    headers_dict = {k.lower(): v.decode("utf-8", errors="replace") for k, v in scope.get("headers", [])}
-                    for header_name in ("x-matched-path", "x-forwarded-uri", "x-forwarded-url", "x-original-uri"):
-                        h_val = headers_dict.get(header_name)
-                        if h_val and h_val not in ("/api/index.py", "/index.py", "/api/index", "/index"):
-                            target_path = h_val.split("?")[0]
-                            break
-
-                # 3. Fallback: if method is POST and still targeting index.py, route to /api/pipeline
+                # Fallback: POST to index.py with no routing info → /api/pipeline
                 if not target_path and scope.get("method") == "POST":
                     target_path = "/api/pipeline"
+
+                # Fallback: GET to index.py with no routing info → /
+                if not target_path and scope.get("method") == "GET":
+                    target_path = "/"
 
                 if target_path:
                     if not target_path.startswith("/"):
@@ -705,26 +721,29 @@ app.include_router(router, prefix="", include_in_schema=False)
 
 
 # ---------------------------------------------------------------------------
-# Frontend
+# Frontend static serving
 # ---------------------------------------------------------------------------
-# Serve static frontend files when running directly via Uvicorn.
-# On Vercel, static assets at the root are served directly by the edge CDN.
+# Priority order for locating the frontend directory:
+#   1. frontend/ relative to project root (local dev with uvicorn)
+#   2. backend/app/static/ (co-deployed alongside the serverless function on Vercel)
+#   3. Root-level index.html (legacy layout)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_BACKEND_APP_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
+BUNDLED_STATIC_DIR = _BACKEND_APP_DIR / "static"
 
 static_dir = None
-if FRONTEND_DIR.exists():
+if FRONTEND_DIR.exists() and (FRONTEND_DIR / "index.html").exists():
     static_dir = FRONTEND_DIR
+elif BUNDLED_STATIC_DIR.exists() and (BUNDLED_STATIC_DIR / "index.html").exists():
+    static_dir = BUNDLED_STATIC_DIR
 elif (PROJECT_ROOT / "index.html").exists():
     static_dir = PROJECT_ROOT
 
-if not os.environ.get("VERCEL") and static_dir and static_dir.exists():
+if static_dir:
     app.mount(
         "/",
-        StaticFiles(
-            directory=str(static_dir),
-            html=True
-        ),
-        name="frontend"
+        StaticFiles(directory=str(static_dir), html=True),
+        name="frontend",
     )
 

@@ -78,14 +78,18 @@ def test_vercel_direct_index_py_fallback():
     assert "regulation_id" in r.json()
 
 def test_vercel_get_health_via_index_py():
-    """Verify GET /api/index.py?__vercel_path=/api/health routes to health endpoint."""
+    """
+    Verify GET /api/index.py?__vercel_path=/api/health routes to health endpoint,
+    and bare GET /api/index.py (no path info) falls back to serving index.html.
+    """
     r = client.get("/api/index.py?__vercel_path=/api/health")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
 
+    # Bare GET /api/index.py (no __vercel_path, no headers) → falls back to / → serves index.html
     r_direct = client.get("/api/index.py")
     assert r_direct.status_code == 200
-    assert r_direct.json()["status"] == "ok"
+    assert "text/html" in r_direct.headers.get("content-type", "")
 
 def test_review_and_audit():
     r_queue = client.get("/api/review")
