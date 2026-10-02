@@ -22,11 +22,13 @@ Endpoints map directly onto the architecture diagram in the project doc:
 import uuid
 from typing import Optional, Literal
 
-from fastapi import FastAPI, HTTPException, APIRouter
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, APIRouter, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from . import database as db
 from .corpus_data import INTERNAL_POLICIES, SAMPLE_REGULATIONS, EVAL_LABELS
@@ -34,15 +36,53 @@ from .nlp_preprocessing import segment_into_clauses
 from .retrieval import HybridRetriever, RELEVANCE_THRESHOLD
 from .agent import run_agent_pipeline
 
-app = FastAPI(title="RCIA - Regulatory Change-Impact Agent", redirect_slashes=False)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    ensure_db()
+    yield
+
+app = FastAPI(title="RCIA - Regulatory Change-Impact Agent", redirect_slashes=False, lifespan=lifespan)
 router = APIRouter()
 
+# ---------------------------------------------------------------------------
+# CORS — allow all origins so the static file server (port 5500) and
+# the FastAPI server (port 8000) can both work during local development.
+# ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # demo only; restrict in production
-    allow_methods=["*"],
+    allow_origins=["*"],          # allow all origins (demo / local dev)
+    allow_credentials=False,      # must be False when allow_origins=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Return JSON for every HTTP error so the frontend error handler works."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "status_code": exc.status_code},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
+
+@app.exception_handler(405)
+async def method_not_allowed_handler(request: Request, exc: Exception):
+    """Return JSON for 405 Method Not Allowed so it is clearly readable by the frontend and client."""
+    return JSONResponse(
+        status_code=405,
+        content={
+            "detail": (
+                f"Method {request.method} not allowed on {request.url.path}. "
+                "The RCIA analysis pipeline requires a POST request containing JSON payload "
+                "with title, source, and regulatory_text."
+            ),
+            "status_code": 405,
+        },
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +101,6 @@ def ensure_db():
             _seed_corpus(conn)
             _seed_eval_labels(conn)
     _db_initialized = True
-
-@app.on_event("startup")
-def on_startup():
-    ensure_db()
 
 @app.middleware("http")
 async def ensure_db_middleware(request, call_next):
@@ -110,10 +146,30 @@ def _load_corpus(conn) -> list[dict]:
 # Schemas
 # ---------------------------------------------------------------------------
 class RegulationIn(BaseModel):
-    title: str
-    source: Optional[str] = None
-    regulatory_text: Optional[str] = None
-    text: Optional[str] = None
+    title: str = Field(
+        ...,
+        description="Title or circular reference of the regulation",
+        examples=["Master Direction on Periodic KYC Updation"]
+    )
+    source: Optional[str] = Field(
+        None,
+        description="Regulatory body or publication source (optional)",
+        examples=["RBI - Illustrative Master Direction Update"]
+    )
+    regulatory_text: Optional[str] = Field(
+        None,
+        description="Full text or circular clauses of the regulation",
+        examples=[
+            "Para 2.1: Re-KYC for low-risk individual customers shall be carried out at intervals not exceeding eight (8) years from the date of the last KYC verification.\n\nPara 2.2: Regulated Entities shall not waive periodic re-KYC solely on the basis of no change in address; a positive confirmation of customer details shall be independently obtained at each re-KYC cycle regardless of address change status."
+        ]
+    )
+    text: Optional[str] = Field(
+        None,
+        description="Alternative field for regulatory text (backwards compatibility)",
+        examples=[
+            "Para 2.1: Re-KYC for low-risk individual customers shall be carried out at intervals not exceeding eight (8) years from the date of the last KYC verification."
+        ]
+    )
 
     @model_validator(mode="after")
     def validate_and_normalize(self):
@@ -141,10 +197,15 @@ class ReviewActionIn(BaseModel):
 # ---------------------------------------------------------------------------
 # Ingestion + pipeline
 # ---------------------------------------------------------------------------
-@router.post("/pipeline")
-@router.post("/pipeline/")
-@router.post("/regulations/ingest")
-@router.post("/regulations/ingest/")
+@router.post(
+    "/pipeline",
+    summary="Run RCIA Analysis Pipeline",
+    description="Run the end-to-end RCIA analysis pipeline: clause segmentation, policy retrieval, change detection, impact analysis, and risk/control mapping.",
+    tags=["Pipeline"],
+)
+@router.post("/pipeline/", include_in_schema=False)
+@router.post("/regulations/ingest", include_in_schema=False)
+@router.post("/regulations/ingest/", include_in_schema=False)
 def ingest_regulation(reg: RegulationIn, top_k: int = 4):
     with db.get_conn() as conn:
         reg_id = f"reg-{uuid.uuid4().hex[:8]}"
@@ -548,13 +609,30 @@ def run_eval():
     }
 
 
+@router.get("/pipeline", include_in_schema=False)
+@router.get("/pipeline/", include_in_schema=False)
+def pipeline_get_not_allowed():
+    raise HTTPException(
+        status_code=405,
+        detail="Method GET not allowed on /api/pipeline. Please send a POST request with JSON payload containing title, source, and regulatory_text.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Convenience: load sample regulations for demo purposes
 # ---------------------------------------------------------------------------
-@router.get("/samples")
-@router.get("/samples/")
+@router.get("/samples", tags=["Samples"], summary="Get sample regulations")
+@router.get("/samples/", include_in_schema=False)
 def get_sample_regulations():
-    return SAMPLE_REGULATIONS
+    return [
+        {
+            "title": s["title"],
+            "source": s.get("source"),
+            "regulatory_text": s.get("regulatory_text") or s.get("text", ""),
+            "text": s.get("text") or s.get("regulatory_text", ""),
+        }
+        for s in SAMPLE_REGULATIONS
+    ]
 
 
 @router.get("/health")

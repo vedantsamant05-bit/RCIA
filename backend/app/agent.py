@@ -1,4 +1,4 @@
-﻿"""
+"""
 agent.py
 --------
 RCIA agent orchestrator.
@@ -91,7 +91,9 @@ MATERIAL_TOPIC_GROUPS = {
     "mechanism": "mechanism",
     "kyc": "kyc",
     "re-kyc": "kyc",
+    "rekyc": "kyc",
     "verification": "kyc",
+    "updation": "kyc",
     "foreclosure": "foreclosure",
     "prepayment": "foreclosure",
     "interest": "interest",
@@ -107,6 +109,8 @@ MATERIAL_TOPIC_GROUPS = {
     "incident": "incident",
     "notification": "notification",
     "notify": "notification",
+    "notified": "notification",
+    "notifications": "notification",
     "reporting": "reporting",
     "report": "reporting",
     "consent": "consent",
@@ -119,6 +123,26 @@ MATERIAL_TOPIC_GROUPS = {
     "approval": "approval",
     "authorized": "authorization",
     "authorization": "authorization",
+    # KYC-domain extensions
+    "risk": "kyc_risk",
+    "classification": "kyc_risk",
+    "profile": "kyc_risk",
+    "periodic": "kyc_periodic",
+    "review": "kyc_periodic",
+    "annual": "kyc_periodic",
+    "annually": "kyc_periodic",
+    "alert": "kyc_monitoring",
+    "alerts": "kyc_monitoring",
+    "monitoring": "kyc_monitoring",
+    "overdue": "kyc_monitoring",
+    "exception": "kyc_exception",
+    "exceptions": "kyc_exception",
+    "audit": "kyc_audit",
+    "trail": "kyc_audit",
+    "procedures": "kyc_policy",
+    "controls": "kyc_policy",
+    "policies": "kyc_policy",
+    "systems": "kyc_policy",
 }
 
 
@@ -348,6 +372,24 @@ def classify_impact(context: FindingContext) -> tuple[str, str]:
         "grievance",
         "interest",
         "borrower",
+        # KYC-domain extensions
+        "updation",
+        "verification",
+        "rekyc",
+        "classification",
+        "periodic",
+        "alerts",
+        "alert",
+        "monitoring",
+        "overdue",
+        "exception",
+        "audit",
+        "trail",
+        "procedures",
+        "controls",
+        "policies",
+        "notified",
+        "notifications",
     } & shared_terms
 
     if len(shared_terms) < 2 and not shared_topics:
@@ -419,6 +461,148 @@ def classify_impact(context: FindingContext) -> tuple[str, str]:
 
     reg_numbers = _extract_numbers(context.regulation_clause)
     int_numbers = _extract_numbers(context.internal_clause["text"])
+
+    # ------------------------------------------------------------------
+    # KYC-domain semantic classification
+    # Covers: periodic review intervals, trigger-based review, automated
+    # alerts, customer notifications, exception management, audit trails,
+    # and policy/system review obligations.
+    # ------------------------------------------------------------------
+    kyc_domains_reg = {
+        MATERIAL_TOPIC_GROUPS[t]
+        for t in re.findall(r"[a-z]+", reg_lower)
+        if t in MATERIAL_TOPIC_GROUPS
+    }
+    kyc_domains_int = {
+        MATERIAL_TOPIC_GROUPS[t]
+        for t in re.findall(r"[a-z]+", int_lower)
+        if t in MATERIAL_TOPIC_GROUPS
+    }
+    shared_kyc_domains = kyc_domains_reg & kyc_domains_int
+
+    # Periodic / interval changes: reg specifies a stricter or looser timeframe
+    if shared_kyc_domains & {"kyc", "kyc_periodic", "kyc_risk"}:
+        if reg_numbers and int_numbers:
+            deadline_ctx = any(
+                w in reg_lower for w in ["year", "years", "month", "months", "day", "days"]
+            )
+            if deadline_ctx:
+                reg_n = reg_numbers[-1]
+                int_n = int_numbers[0]
+                if reg_n < int_n:
+                    return (
+                        "tightens",
+                        f"New regulatory KYC timeframe ({reg_n}) is stricter than internal policy ({int_n}).",
+                    )
+                if reg_n > int_n:
+                    return (
+                        "loosens",
+                        f"New regulatory KYC timeframe ({reg_n}) is longer than internal policy ({int_n}).",
+                    )
+
+    # Trigger-based review: regulation adds new trigger conditions not in internal clause
+    if "kyc_periodic" in shared_kyc_domains or "kyc_risk" in shared_kyc_domains:
+        trigger_terms_reg = {
+            t for t in ["material", "beneficial", "ownership", "adverse", "patterns", "triggered"]
+            if t in reg_lower
+        }
+        trigger_terms_int = {
+            t for t in ["material", "beneficial", "ownership", "adverse", "patterns", "triggered"]
+            if t in int_lower
+        }
+        if trigger_terms_reg and len(trigger_terms_reg - trigger_terms_int) >= 1:
+            return (
+                "tightens",
+                "Regulation introduces additional KYC trigger conditions not fully captured in the internal clause.",
+            )
+
+    # Monitoring / alert interval: reg requires alerts with an explicit lead time
+    if "kyc_monitoring" in shared_kyc_domains:
+        if reg_numbers and int_numbers:
+            reg_n = reg_numbers[0]
+            int_n = int_numbers[0]
+            if reg_n != int_n:
+                return (
+                    "tightens" if reg_n > int_n else "loosens",
+                    f"Regulatory KYC alert lead time ({reg_n} days) differs from internal control ({int_n} days).",
+                )
+        elif reg_numbers and not int_numbers:
+            return (
+                "tightens",
+                "Regulation introduces an explicit KYC alert lead-time requirement absent from the internal clause.",
+            )
+
+    # Notification / restriction: reg adds a firm due-date or restriction timeline
+    if "kyc_notification" in shared_kyc_domains or (
+        "notification" in kyc_domains_reg and "kyc" in kyc_domains_int
+    ):
+        if reg_numbers and int_numbers:
+            reg_n = reg_numbers[0]
+            int_n = int_numbers[0]
+            if reg_n < int_n:
+                return (
+                    "tightens",
+                    f"Regulatory notification/restriction threshold ({reg_n} days) is stricter than internal ({int_n} days).",
+                )
+        elif reg_numbers and not int_numbers:
+            return (
+                "tightens",
+                "Regulation introduces a specific notification or account-restriction timeline not present in internal clause.",
+            )
+
+    # Exception management: reg requires formal exception committee / documentation
+    if "kyc_exception" in shared_kyc_domains:
+        reg_committee = any(t in reg_lower for t in ["committee", "authorized", "approved", "documented"])
+        int_committee = any(t in int_lower for t in ["committee", "authorized", "approved", "documented"])
+        if reg_committee and not int_committee:
+            return (
+                "tightens",
+                "Regulation requires a formal exception management committee / approval process not present in internal clause.",
+            )
+        if shared_kyc_domains & {"kyc_exception"}:
+            return (
+                "tightens",
+                "Regulation tightens exception management requirements for KYC non-completion.",
+            )
+
+    # Audit trail: reg imposes a specific retention period or scope extension
+    if "kyc_audit" in shared_kyc_domains:
+        if reg_numbers and int_numbers:
+            reg_n = reg_numbers[-1]
+            int_n = int_numbers[-1]
+            if reg_n > int_n:
+                return (
+                    "tightens",
+                    f"Regulatory audit-trail retention ({reg_n} years) exceeds internal requirement ({int_n} years).",
+                )
+        scope_terms_reg = {
+            t for t in ["identification", "classification", "notifications", "approvals", "restrictions"]
+            if t in reg_lower
+        }
+        scope_terms_int = {
+            t for t in ["identification", "classification", "notifications", "approvals", "restrictions"]
+            if t in int_lower
+        }
+        if len(scope_terms_reg - scope_terms_int) >= 2:
+            return (
+                "tightens",
+                "Regulation expands the scope of KYC audit trail records beyond what the internal clause covers.",
+            )
+
+    # Policy / systems review: reg mandates periodic or trigger-based policy review
+    if "kyc_policy" in shared_kyc_domains:
+        if (
+            any(t in reg_lower for t in ["annual", "annually", "material change", "regulatory"])
+            and any(t in int_lower for t in ["annual", "annually", "regulatory", "review"])
+        ):
+            return (
+                "tightens",
+                "Regulation requires periodic and trigger-based policy/systems review that may impose stricter review obligations than the internal clause.",
+            )
+
+    # ------------------------------------------------------------------
+    # End KYC-domain semantic classification
+    # ------------------------------------------------------------------
 
     if reg_numbers and int_numbers:
         transition = re.search(
@@ -914,12 +1098,16 @@ def self_critique(
             source_groups = _material_topic_groups(source)
             unsupported_groups = action_groups - source_groups
 
-            # Generic implementation vocabulary isn't treated as an
-            # unsupported regulatory requirement by itself.
+            # Generic implementation vocabulary and KYC implementation terms
+            # are not treated as unsupported regulatory requirements.
             unsupported_groups -= {
                 "records",
                 "access",
                 "channel",
+                "kyc_audit",
+                "kyc_monitoring",
+                "kyc_policy",
+                "kyc_notification",
             }
 
             if unsupported_groups:

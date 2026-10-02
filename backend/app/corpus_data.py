@@ -27,6 +27,13 @@ INTERNAL_POLICIES = {
         ("1.3", "Video-based KYC (V-CIP) may be used as an alternative to in-branch verification for customers opening savings accounts, subject to a maximum daily transaction limit as defined in Annexure A."),
         ("2.1", "Periodic KYC updation shall be conducted every ten (10) years for low-risk customers and every two (2) years for high-risk customers."),
         ("2.2", "Re-KYC may be waived for customers who have had no change in registered address or contact details since the last verification cycle."),
+        ("2.3", "Customer risk classification shall be assigned at onboarding based on the customer's profile, nature of business, and expected transaction patterns. Risk classification shall be reviewed annually or upon material change in customer activity."),
+        ("2.4", "A KYC review shall be triggered when there is a material change in the customer's risk profile, change of beneficial ownership, an unusual pattern of transactions, or a change in the customer's country of residence or nationality."),
+        ("3.1", "The KYC monitoring system shall generate automated alerts for customers whose KYC updation due date falls within the next ninety (90) days. Relationship managers shall act on all open KYC alerts within thirty (30) days of generation."),
+        ("3.2", "Customers shall be notified via their registered communication channel at least sixty (60) days prior to their KYC updation due date. A second notification shall be sent thirty (30) days prior if the updation remains outstanding."),
+        ("3.3", "Where a customer's KYC updation cannot be completed due to non-responsiveness, the account shall be subject to transaction restrictions after a clearly documented exception management process, including a minimum of two customer contact attempts."),
+        ("3.4", "All KYC update activities, customer notifications, exception approvals, and account restriction decisions shall be recorded in the KYC audit trail within the core banking system. Records shall be retained for the duration of the customer relationship plus five (5) years."),
+        ("4.1", "The KYC Policy, related procedures, system configurations, and operational controls shall be reviewed annually and upon issuance of a new regulatory direction, to ensure continued compliance with applicable KYC and AML requirements."),
     ],
     "Third-Party Vendor Data Sharing Agreement Template": [
         ("5.1", "Vendor may process customer data solely for the purposes explicitly enumerated in Schedule B of this Agreement."),
@@ -107,6 +114,40 @@ SAMPLE_REGULATIONS = [
             "re-KYC cycle regardless of address change status."
         ),
     },
+    {
+        "title": "Comprehensive KYC Direction - Risk, Review and Controls",
+        "source": "RBI - Illustrative Comprehensive Master Direction",
+        "regulatory_text": (
+            "Para 1.1: Regulated Entities shall ensure that customer KYC information remains accurate, "
+            "complete and current. Changes to customer details shall be updated in the KYC system within "
+            "thirty (30) days of the Regulated Entity becoming aware of such change.\n\n"
+            "Para 1.2: Customers shall be classified according to their risk profile based on factors "
+            "including, but not limited to, nature of business, source of funds, geography, and transaction "
+            "volumes. The risk classification shall be reviewed at least annually.\n\n"
+            "Para 1.3: KYC information of high-risk customers shall be updated at least once every two (2) "
+            "years. Low-risk customers shall undergo KYC updation at intervals not exceeding eight (8) years.\n\n"
+            "Para 1.4: A KYC review shall also be initiated when there is a material change in customer "
+            "circumstances including change in beneficial ownership, significant change in transaction "
+            "patterns, or adverse media findings.\n\n"
+            "Para 2.1: The Regulated Entity shall maintain the date of the customer's last KYC updation "
+            "and the next due date in its core systems. Systems shall generate automated alerts at least "
+            "ninety (90) days before the KYC updation is due.\n\n"
+            "Para 2.2: Customers shall be notified of their KYC updation requirement through the registered "
+            "communication channel. Where KYC updation remains outstanding beyond sixty (60) days of the "
+            "due date, the account shall be subject to transaction restrictions.\n\n"
+            "Para 2.3: Regulated Entities shall document all cases where KYC updation could not be "
+            "completed. Such cases shall be reviewed and approved by an authorized exception management "
+            "committee. The exception record shall include reasons, customer contact attempts, and remedial "
+            "actions planned.\n\n"
+            "Para 3.1: All KYC-related activities including customer identification, document verification, "
+            "risk classification, periodic reviews, customer notifications, exception approvals, and "
+            "account restriction decisions shall be maintained as an audit trail within the core banking "
+            "system for a period of not less than five (5) years after the end of the customer relationship.\n\n"
+            "Para 3.2: Regulated Entities shall review their KYC policies, procedures, systems and controls "
+            "whenever there is a material change in regulatory requirements or at a minimum on an annual "
+            "basis, to ensure continued adequacy of KYC controls."
+        ),
+    },
 ]
 
 # Section 5: hand-labeled (regulation clause, internal clause) pairs used
@@ -180,6 +221,56 @@ EVAL_LABELS = [
         "regulation_clause_text": "data fiduciaries shall implement a mechanism through which a data principal may submit a request for erasure of personal data through the same channel used for account services",
         "internal_doc": "Customer Data Retention Policy v3.2",
         "internal_section": "3.1",
+        "is_impacted": 1,
+        "true_impact_type": "tightens",
+    },
+    # Extended KYC regulation labels
+    {
+        "regulation_clause_text": "Customers shall be classified according to their risk profile based on factors including nature of business, source of funds, geography, and transaction volumes. The risk classification shall be reviewed at least annually.",
+        "internal_doc": "KYC and Customer Onboarding SOP v5.0",
+        "internal_section": "2.3",
+        "is_impacted": 1,
+        "true_impact_type": "tightens",
+    },
+    {
+        "regulation_clause_text": "A KYC review shall also be initiated when there is a material change in customer circumstances including change in beneficial ownership, significant change in transaction patterns, or adverse media findings.",
+        "internal_doc": "KYC and Customer Onboarding SOP v5.0",
+        "internal_section": "2.4",
+        "is_impacted": 1,
+        "true_impact_type": "tightens",
+    },
+    {
+        "regulation_clause_text": "Systems shall generate automated alerts at least ninety (90) days before the KYC updation is due.",
+        "internal_doc": "KYC and Customer Onboarding SOP v5.0",
+        "internal_section": "3.1",
+        "is_impacted": 1,
+        "true_impact_type": "tightens",
+    },
+    {
+        "regulation_clause_text": "Customers shall be notified of their KYC updation requirement through the registered communication channel. Where KYC updation remains outstanding beyond sixty (60) days of the due date, the account shall be subject to transaction restrictions.",
+        "internal_doc": "KYC and Customer Onboarding SOP v5.0",
+        "internal_section": "3.2",
+        "is_impacted": 1,
+        "true_impact_type": "tightens",
+    },
+    {
+        "regulation_clause_text": "Regulated Entities shall document all cases where KYC updation could not be completed. Such cases shall be reviewed and approved by an authorized exception management committee.",
+        "internal_doc": "KYC and Customer Onboarding SOP v5.0",
+        "internal_section": "3.3",
+        "is_impacted": 1,
+        "true_impact_type": "tightens",
+    },
+    {
+        "regulation_clause_text": "All KYC-related activities including customer identification, document verification, risk classification, periodic reviews, customer notifications, exception approvals, and account restriction decisions shall be maintained as an audit trail within the core banking system for a period of not less than five (5) years after the end of the customer relationship.",
+        "internal_doc": "KYC and Customer Onboarding SOP v5.0",
+        "internal_section": "3.4",
+        "is_impacted": 1,
+        "true_impact_type": "tightens",
+    },
+    {
+        "regulation_clause_text": "Regulated Entities shall review their KYC policies, procedures, systems and controls whenever there is a material change in regulatory requirements or at a minimum on an annual basis.",
+        "internal_doc": "KYC and Customer Onboarding SOP v5.0",
+        "internal_section": "4.1",
         "is_impacted": 1,
         "true_impact_type": "tightens",
     },

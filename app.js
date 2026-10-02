@@ -12,9 +12,23 @@
   "use strict";
 
   function initRCIA() {
+    function resolveDefaultApiBase() {
+      const origin = window.location.origin;
+      const hostname = window.location.hostname;
+      const port = window.location.port;
+      if (hostname && !["localhost", "127.0.0.1", "0.0.0.0"].includes(hostname)) {
+        return origin;
+      }
+      if (port === "8000") {
+        return origin;
+      }
+      const host = hostname || "127.0.0.1";
+      return `http://${host}:8000`;
+    }
+
     const API_BASE =
       (window.RCIA_CONFIG && window.RCIA_CONFIG.API_BASE) ||
-      window.location.origin;
+      resolveDefaultApiBase();
 
     // ---------------------------------------------------------------------------
     // View switching
@@ -283,6 +297,10 @@
             loadRegulations();
             refreshQueueCount();
           } catch (err) {
+            let errorMsg = err.message || "Unknown error occurred";
+            if (errorMsg === "Failed to fetch" || errorMsg.includes("NetworkError")) {
+              errorMsg = `Could not connect to backend at ${API_BASE}. Make sure the FastAPI server is running on port 8000 (uvicorn backend.app.main:app --reload --port 8000).`;
+            }
             ingestResultEl.innerHTML = `
               <div class="pipeline-error" style="border: 1px solid var(--risk-high, #ef4444); background: rgba(239, 68, 68, 0.08); padding: 14px; border-radius: 6px; margin-top: 8px;">
                 <div style="font-weight: 600; color: var(--risk-high, #ef4444); margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
@@ -290,7 +308,7 @@
                   <span>Pipeline Execution Failed</span>
                 </div>
                 <p style="color: var(--risk-high, #ef4444); font-size: 13px; margin: 0; line-height: 1.4; word-break: break-word;">
-                  ${esc(err.message)}
+                  ${esc(errorMsg)}
                 </p>
               </div>
             `;
